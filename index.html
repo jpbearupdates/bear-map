@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>全日本熊出沒地圖 (即時數據版)</title>
+    <title>全日本熊出沒地圖 (修正定位版)</title>
     
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -31,9 +31,9 @@
             transition: all 0.3s ease;
             position: relative;
         }
-        .card.locating { border-left-color: #ffcc00; } /* 搜尋中 - 黃色 */
-        .card.located { border-left-color: #00cc66; }  /* 已定位 - 綠色 */
-        .card.failed { border-left-color: #ff4444; }   /* 失敗 - 紅色 */
+        .card.locating { border-left-color: #ffcc00; }
+        .card.located { border-left-color: #00cc66; }
+        .card.failed { border-left-color: #ff4444; }
 
         .card h3 { margin: 0 0 8px 0; font-size: 1rem; line-height: 1.4; color: #fff; }
         .card .meta { font-size: 0.8em; color: #bbb; margin-bottom: 5px; }
@@ -103,8 +103,8 @@
 
     // --- 2. 核心邏輯：Regex + Cache + API ---
 
-    // 緩存系統
-    const CACHE_KEY = 'bear_map_cache_v2'; // 升級 key 版本
+    // 緩存系統 (升級版本號以清除舊的錯誤緩存)
+    const CACHE_KEY = 'bear_map_cache_v3_fixed'; 
     let locationCache = JSON.parse(localStorage.getItem(CACHE_KEY)) || {};
 
     function saveCache() {
@@ -117,57 +117,58 @@
         location.reload();
     }
 
-    // Regex 提取地名
+    // 優化版 Regex 提取地名
     function extractLocation(title) {
-        // 策略 1: 括號內的內容 (通常是縣市)
-        const parenMatch = title.match(/（(.*?)）/);
+        // 1. 抓取括號內的縣名 (支援全形（）和半形())
         let region = "";
+        const parenMatch = title.match(/[（(](.*?)[）)]/);
         if (parenMatch) {
             region = parenMatch[1];
         }
 
-        // 策略 2: 抓取 "XX県XX市" 或 "XX市XX町"
-        const geoRegex = /(北海道|青森|岩手|宮城|秋田|山形|福島|茨城|栃木|群馬|埼玉|千葉|東京|神奈川|新潟|富山|石川|福井|山梨|長野|岐阜|静岡|愛知|三重|滋賀|京都|大阪|兵庫|奈良|和歌山|鳥取|島根|岡山|広島|山口|徳島|香川|愛媛|高知|福岡|佐賀|長崎|熊本|大分|宮崎|鹿児島|沖縄)[県府都道]?.*?([市町村区])/;
+        // 2. 移除括號內容，只看剩下的字串來抓市町村
+        // 例如 "(富山) 上市町..." -> 移除 "(富山)" -> 剩 " 上市町..."
+        let cleanTitle = title.replace(/[（(].*?[）)]/g, '').trim();
+
+        // 3. 抓取 "XX市" "XX町" "XX村" "XX区"
+        // 這裡使用非貪婪匹配，抓取最先出現的市町村
+        const cityMatch = cleanTitle.match(/.*?([市町村区])/);
         
-        const match = title.match(geoRegex);
-        
-        if (match) {
-            return match[0];
-        } else if (region) {
-            const cityMatch = title.match(/.*?([市町村区])/);
-            if (cityMatch) {
-                return region + cityMatch[1]; 
+        if (cityMatch) {
+            const cityName = cityMatch[0].trim();
+            // 如果有縣名，組合成 "富山県 上市町" (這對 API 最準確)
+            if (region) {
+                return `${region} ${cityName}`;
             }
-            return region;
+            return cityName;
         }
         
-        // 策略 3: 尋找常見地名後綴 (排除雜訊)
-        const looseMatch = title.match(/.*?([市町村])/);
-        if (looseMatch && !title.includes("日本不審者")) {
-            return looseMatch[0];
+        // 4. 如果上面的方法失敗，嘗試抓取標準格式 "XX県XX市"
+        const fullMatch = title.match(/(北海道|青森|岩手|宮城|秋田|山形|福島|茨城|栃木|群馬|埼玉|千葉|東京|神奈川|新潟|富山|石川|福井|山梨|長野|岐阜|静岡|愛知|三重|滋賀|京都|大阪|兵庫|奈良|和歌山|鳥取|島根|岡山|広島|山口|徳島|香川|愛媛|高知|福岡|佐賀|長崎|熊本|大分|宮崎|鹿児島|沖縄)[県府都道]?.*?([市町村区])/);
+        
+        if (fullMatch) {
+            return fullMatch[0];
         }
 
-        return null;
+        // 5. 如果真的抓不到市町村，至少回傳縣名
+        return region || null;
     }
 
-    // 隊列系統 (Rate Limiting)
+    // 隊列系統
     let fetchQueue = [];
     let isProcessing = false;
 
     function addToMap(item, lat, lng, isCached) {
-        // 增加隨機偏移，防止同一城市的點完全重疊
         const jitter = 0.005; 
         const finalLat = parseFloat(lat) + (Math.random() - 0.5) * jitter;
         const finalLng = parseFloat(lng) + (Math.random() - 0.5) * jitter;
 
-        // 確保 ID 存在，如果 JSON 沒有 ID，用標題的 Hash 代替
         const itemId = item.id || 'id-' + Math.abs(item.title.split("").reduce((a,b)=>{a=((a<<5)-a)+b.charCodeAt(0);return a&a},0));
 
         const marker = L.marker([finalLat, finalLng], {icon: bearIcon})
             .bindPopup(`<b>${item.title}</b><br><small>${item.date}</small><br><a href="${item.link}" target="_blank">來源: ${item.source}</a>`);
         markers.addLayer(marker);
 
-        // 更新側邊欄狀態
         const card = document.getElementById(`card-${itemId}`);
         if (card) {
             card.classList.remove('locating');
@@ -191,21 +192,22 @@
 
         document.getElementById('progress-text').innerText = `正在定位: ${locationName}... (剩餘 ${fetchQueue.length})`;
 
-        // OpenStreetMap Nominatim API
-        fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(locationName)}`)
+        // ★★★ 關鍵修正：加入 &countrycodes=jp 參數 ★★★
+        // 這會強制 OpenStreetMap 只在日本境內搜尋，解決 "上市" 跑到中國的問題
+        const apiUrl = `https://nominatim.openstreetmap.org/search?format=json&countrycodes=jp&q=${encodeURIComponent(locationName)}`;
+
+        fetch(apiUrl)
             .then(res => res.json())
             .then(data => {
                 if (data && data.length > 0) {
                     const lat = data[0].lat;
                     const lon = data[0].lon;
                     
-                    // 存入緩存
                     locationCache[locationName] = { lat: lat, lng: lon };
                     saveCache();
 
                     addToMap(item, lat, lon, false);
                 } else {
-                    // 失敗處理
                     const card = document.getElementById(`card-${itemId}`);
                     if(card) {
                         card.classList.remove('locating');
@@ -217,19 +219,15 @@
             })
             .catch(err => console.error(err))
             .finally(() => {
-                // 嚴格遵守 API 規範，間隔 1.2 秒
                 setTimeout(processQueue, 1200);
             });
     }
 
-    // --- 3. 主程式：讀取外部 JSON ---
+    // --- 3. 主程式 ---
     
-    // 使用時間戳防止瀏覽器緩存 JSON 檔案
     fetch('bear_data.json?t=' + new Date().getTime())
         .then(response => {
-            if (!response.ok) {
-                throw new Error("HTTP error " + response.status);
-            }
+            if (!response.ok) throw new Error("HTTP error " + response.status);
             return response.json();
         })
         .then(data => {
@@ -237,18 +235,14 @@
             document.getElementById('progress-text').innerText = `讀取到 ${data.length} 筆資料，開始分析...`;
 
             data.forEach((item, index) => {
-                // 產生唯一 ID (如果 JSON 裡沒有 id 欄位)
                 const itemId = item.id || 'id-' + index;
-                item.id = itemId; // 補回 item 物件方便後續使用
+                item.id = itemId;
 
-                // 1. 建立側邊欄卡片
                 const card = document.createElement('div');
                 card.className = 'card locating'; 
                 card.id = `card-${itemId}`;
                 
-                // 嘗試提取地名
                 let locName = extractLocation(item.title);
-                
                 let displayTitle = item.title.length > 40 ? item.title.substring(0, 40) + "..." : item.title;
 
                 card.innerHTML = `
@@ -267,17 +261,13 @@
                     return;
                 }
 
-                // 2. 檢查緩存
                 if (locationCache[locName]) {
-                    // 命中緩存 -> 立即顯示
                     addToMap(item, locationCache[locName].lat, locationCache[locName].lng, true);
                 } else {
-                    // 未命中 -> 加入 API 隊列
                     fetchQueue.push({ item: item, locationName: locName, itemId: itemId });
                 }
             });
 
-            // 啟動隊列
             if (fetchQueue.length > 0) {
                 processQueue();
             } else {
@@ -286,7 +276,7 @@
         })
         .catch(err => {
             console.error("讀取 JSON 失敗:", err);
-            document.getElementById('news-list').innerHTML = `<div style="padding:20px; color:#ff4444;">讀取 bear_data.json 失敗。<br>請確保檔案存在且格式正確。<br>錯誤訊息: ${err.message}</div>`;
+            document.getElementById('news-list').innerHTML = `<div style="padding:20px; color:#ff4444;">讀取 bear_data.json 失敗。<br>${err.message}</div>`;
         });
 
 </script>
