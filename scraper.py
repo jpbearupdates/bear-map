@@ -4,6 +4,7 @@ import datetime
 import os
 import hashlib
 import time
+import random  # <--- 1. 新增 random 模組
 import google.generativeai as genai
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut
@@ -117,20 +118,26 @@ def update_feed():
             print(f"   ❌ 跳過: 找不到該地點的座標")
             continue 
 
-        # 3. 建立新數據物件
+        # 3. 建立新數據物件 (加入隨機偏移 Jitter)
+        # <--- 2. 修改開始：加入隨機偏移量，避免標記重疊 --->
+        # 0.002 度大約等於 200 公尺，這足以讓標記在地圖上分開顯示
+        jitter_lat = coords['lat'] + random.uniform(-0.002, 0.002)
+        jitter_lng = coords['lng'] + random.uniform(-0.002, 0.002)
+        # <--- 修改結束 --->
+
         new_item = {
             "id": hashlib.md5(entry.link.encode()).hexdigest(),
             "title": title,
             "location": extracted_location, # 儲存乾淨的地點名稱
-            "lat": coords['lat'],
-            "lng": coords['lng'],
+            "lat": jitter_lat, # 使用加了偏移的座標
+            "lng": jitter_lng, # 使用加了偏移的座標
             "date": pub_date,
             "link": entry.link,
             "source": entry.source.title if 'source' in entry else "Google News"
         }
         
         new_entries.append(new_item)
-        print(f"   ✅ 成功加入資料！")
+        print(f"   ✅ 成功加入資料！(座標已微調)")
         
         # 禮貌性暫停，避免對 Geocoding API 請求過快
         time.sleep(1)
