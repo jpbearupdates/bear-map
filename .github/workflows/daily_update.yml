@@ -5,10 +5,8 @@ on:
     - cron: '0 23 * * *'
   workflow_dispatch:
 
-# --- 請加入這段 (解決 403 錯誤) ---
 permissions:
   contents: write
-# --------------------------------
 
 jobs:
   update-data:
@@ -23,13 +21,17 @@ jobs:
       with:
         python-version: '3.9'
 
+    # --- 修正點：安裝步驟必須在 Run scraper 之前 ---
     - name: Install dependencies
       run: |
-        pip install feedparser requests
+        python -m pip install --upgrade pip
+        # 確保這裡安裝了所有需要的套件
+        pip install feedparser requests beautifulsoup4 geopy google-generativeai
+        # 或者如果你已經上傳了 requirements.txt，也可以用: pip install -r requirements.txt
 
     - name: Run scraper
       env:
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} # 這行最重要
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       run: python scraper.py
 
     - name: Commit and push changes
