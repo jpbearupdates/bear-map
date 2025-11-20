@@ -4,7 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>日本熊出沒監測 (2025 Live)</title>
+    
+    <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <!-- 加入 MarkerCluster CSS (聚合樣式) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+
     <style>
         body { margin: 0; display: flex; height: 100vh; font-family: sans-serif; background: #222; color: #fff; }
         #map { flex: 3; height: 100%; }
@@ -13,6 +20,15 @@
         .card h4 { margin: 0 0 5px 0; color: #ffaaaa; }
         .card small { color: #aaa; }
         .card a { color: #88ccff; text-decoration: none; display: block; margin-top: 5px; }
+        
+        /* 修正 Popup 文字顏色，因為底圖係深色 */
+        .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+            background: #333;
+            color: #fff;
+        }
+        .leaflet-popup-content a {
+            color: #88ccff;
+        }
     </style>
 </head>
 <body>
@@ -24,12 +40,22 @@
     <div id="news-list"></div>
 </div>
 
+<!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<!-- 加入 MarkerCluster JS (聚合功能) -->
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+
 <script>
     const map = L.map('map').setView([38.5, 137.0], 5);
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
         attribution: '© OpenStreetMap, © CARTO'
     }).addTo(map);
+
+    // 建立聚合群組 (Cluster Group)
+    const markers = L.markerClusterGroup({
+        disableClusteringAtZoom: 14, // 拉近到 Zoom 14 就唔再聚合，顯示原本圖示
+        spiderfyOnMaxZoom: true      // 最底層如果重疊，點擊會散開
+    });
 
     const bearIcon = L.icon({
         iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
@@ -46,10 +72,12 @@
             document.getElementById('last-updated').innerText = `數據截至: ${new Date().toLocaleString()}`;
 
             data.forEach(item => {
-                // 地圖標記
-                L.marker([item.lat, item.lng], {icon: bearIcon})
-                 .addTo(map)
+                // 建立 Marker
+                const marker = L.marker([item.lat, item.lng], {icon: bearIcon})
                  .bindPopup(`<b>${item.location}</b><br>${item.date}<br><a href="${item.link}" target="_blank">新聞連結</a>`);
+
+                // 重點：將 Marker 加入聚合群組，而唔係直接 addTo(map)
+                markers.addLayer(marker);
 
                 // 側邊欄列表
                 const card = document.createElement('div');
@@ -62,6 +90,9 @@
                 `;
                 list.appendChild(card);
             });
+
+            // 迴圈完結後，將整個群組加入地圖
+            map.addLayer(markers);
         })
         .catch(err => console.error("無法讀取數據:", err));
 </script>
