@@ -1,285 +1,432 @@
-<!DOCTYPE html>
-<html lang="zh-HK">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>全日本熊出沒地圖 (修正定位版)</title>
-    
-    <!-- Leaflet CSS -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <!-- MarkerCluster CSS -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
-    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
-
-    <style>
-        body { margin: 0; display: flex; height: 100vh; font-family: "Microsoft JhengHei", sans-serif; background: #1a1a1a; color: #e0e0e0; }
-        #map { flex: 3; height: 100%; z-index: 1; }
-        #sidebar { flex: 1; padding: 20px; overflow-y: auto; background: #222; box-shadow: -2px 0 10px rgba(0,0,0,0.5); z-index: 2; }
-        
-        /* Header */
-        .header { margin-bottom: 20px; border-bottom: 1px solid #444; padding-bottom: 10px; }
-        .header h2 { margin: 0; color: #fff; display: flex; align-items: center; gap: 10px; }
-        .status-bar { font-size: 0.85em; color: #aaa; margin-top: 8px; display: flex; justify-content: space-between; }
-        
-        /* Card Design */
-        .card { 
-            background: #333; 
-            margin-bottom: 15px; 
-            padding: 15px; 
-            border-radius: 6px; 
-            border-left: 5px solid #555; 
-            transition: all 0.3s ease;
-            position: relative;
-        }
-        .card.locating { border-left-color: #ffcc00; }
-        .card.located { border-left-color: #00cc66; }
-        .card.failed { border-left-color: #ff4444; }
-
-        .card h3 { margin: 0 0 8px 0; font-size: 1rem; line-height: 1.4; color: #fff; }
-        .card .meta { font-size: 0.8em; color: #bbb; margin-bottom: 5px; }
-        .card .status-text { font-size: 0.75em; font-weight: bold; float: right; }
-        .status-searching { color: #ffcc00; }
-        .status-success { color: #00cc66; }
-        .status-error { color: #ff4444; }
-
-        .card a { color: #66b3ff; text-decoration: none; font-size: 0.9em; display: inline-block; margin-top: 5px; }
-        .card a:hover { text-decoration: underline; }
-
-        /* Cluster Color Override */
-        .marker-cluster-small, .marker-cluster-medium, .marker-cluster-large {
-            background-color: rgba(255, 100, 100, 0.6) !important;
-        }
-        .marker-cluster div {
-            background-color: rgba(200, 0, 0, 0.8) !important;
-            color: white;
-        }
-
-        @media (max-width: 768px) {
-            body { flex-direction: column; }
-            #map { flex: 2; }
-            #sidebar { flex: 1; }
-        }
-    </style>
-</head>
-<body>
-
-<div id="map"></div>
-<div id="sidebar">
-    <div class="header">
-        <h2>🐻 智能熊出沒監測</h2>
-        <div class="status-bar">
-            <span id="progress-text">讀取數據中...</span>
-            <button onclick="clearCache()" style="background:none; border:none; color:#666; cursor:pointer; font-size:0.8em; text-decoration:underline;">清除緩存</button>
-        </div>
-    </div>
-    <div id="news-list"></div>
-</div>
-
-<!-- Leaflet JS -->
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
-
-<script>
-    // --- 1. 初始化地圖 ---
-    const map = L.map('map').setView([38.0, 138.0], 5);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-        attribution: '© OpenStreetMap, © CARTO'
-    }).addTo(map);
-
-    const markers = L.markerClusterGroup({
-        maxClusterRadius: 40,
-        spiderfyOnMaxZoom: true
-    });
-    map.addLayer(markers);
-
-    const bearIcon = L.icon({
-        iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
-        iconSize: [25, 41],
-        iconAnchor: [12, 41],
-        popupAnchor: [1, -34],
-        shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
-        shadowSize: [41, 41]
-    });
-
-    // --- 2. 核心邏輯：Regex + Cache + API ---
-
-    // 緩存系統 (升級版本號以清除舊的錯誤緩存)
-    const CACHE_KEY = 'bear_map_cache_v3_fixed'; 
-    let locationCache = JSON.parse(localStorage.getItem(CACHE_KEY)) || {};
-
-    function saveCache() {
-        localStorage.setItem(CACHE_KEY, JSON.stringify(locationCache));
-    }
-    
-    window.clearCache = function() {
-        localStorage.removeItem(CACHE_KEY);
-        alert('緩存已清除，請刷新頁面重新抓取。');
-        location.reload();
-    }
-
-    // 優化版 Regex 提取地名
-    function extractLocation(title) {
-        // 1. 抓取括號內的縣名 (支援全形（）和半形())
-        let region = "";
-        const parenMatch = title.match(/[（(](.*?)[）)]/);
-        if (parenMatch) {
-            region = parenMatch[1];
-        }
-
-        // 2. 移除括號內容，只看剩下的字串來抓市町村
-        // 例如 "(富山) 上市町..." -> 移除 "(富山)" -> 剩 " 上市町..."
-        let cleanTitle = title.replace(/[（(].*?[）)]/g, '').trim();
-
-        // 3. 抓取 "XX市" "XX町" "XX村" "XX区"
-        // 這裡使用非貪婪匹配，抓取最先出現的市町村
-        const cityMatch = cleanTitle.match(/.*?([市町村区])/);
-        
-        if (cityMatch) {
-            const cityName = cityMatch[0].trim();
-            // 如果有縣名，組合成 "富山県 上市町" (這對 API 最準確)
-            if (region) {
-                return `${region} ${cityName}`;
-            }
-            return cityName;
-        }
-        
-        // 4. 如果上面的方法失敗，嘗試抓取標準格式 "XX県XX市"
-        const fullMatch = title.match(/(北海道|青森|岩手|宮城|秋田|山形|福島|茨城|栃木|群馬|埼玉|千葉|東京|神奈川|新潟|富山|石川|福井|山梨|長野|岐阜|静岡|愛知|三重|滋賀|京都|大阪|兵庫|奈良|和歌山|鳥取|島根|岡山|広島|山口|徳島|香川|愛媛|高知|福岡|佐賀|長崎|熊本|大分|宮崎|鹿児島|沖縄)[県府都道]?.*?([市町村区])/);
-        
-        if (fullMatch) {
-            return fullMatch[0];
-        }
-
-        // 5. 如果真的抓不到市町村，至少回傳縣名
-        return region || null;
-    }
-
-    // 隊列系統
-    let fetchQueue = [];
-    let isProcessing = false;
-
-    function addToMap(item, lat, lng, isCached) {
-        const jitter = 0.005; 
-        const finalLat = parseFloat(lat) + (Math.random() - 0.5) * jitter;
-        const finalLng = parseFloat(lng) + (Math.random() - 0.5) * jitter;
-
-        const itemId = item.id || 'id-' + Math.abs(item.title.split("").reduce((a,b)=>{a=((a<<5)-a)+b.charCodeAt(0);return a&a},0));
-
-        const marker = L.marker([finalLat, finalLng], {icon: bearIcon})
-            .bindPopup(`<b>${item.title}</b><br><small>${item.date}</small><br><a href="${item.link}" target="_blank">來源: ${item.source}</a>`);
-        markers.addLayer(marker);
-
-        const card = document.getElementById(`card-${itemId}`);
-        if (card) {
-            card.classList.remove('locating');
-            card.classList.add('located');
-            const statusSpan = card.querySelector('.status-text');
-            statusSpan.innerHTML = isCached ? '⚡ 緩存命中' : '🟢 API 定位';
-            statusSpan.className = 'status-text status-success';
-        }
-    }
-
-    function processQueue() {
-        if (fetchQueue.length === 0) {
-            isProcessing = false;
-            document.getElementById('progress-text').innerText = "所有數據處理完畢";
-            return;
-        }
-
-        isProcessing = true;
-        const task = fetchQueue.shift();
-        const { item, locationName, itemId } = task;
-
-        document.getElementById('progress-text').innerText = `正在定位: ${locationName}... (剩餘 ${fetchQueue.length})`;
-
-        // ★★★ 關鍵修正：加入 &countrycodes=jp 參數 ★★★
-        // 這會強制 OpenStreetMap 只在日本境內搜尋，解決 "上市" 跑到中國的問題
-        const apiUrl = `https://nominatim.openstreetmap.org/search?format=json&countrycodes=jp&q=${encodeURIComponent(locationName)}`;
-
-        fetch(apiUrl)
-            .then(res => res.json())
-            .then(data => {
-                if (data && data.length > 0) {
-                    const lat = data[0].lat;
-                    const lon = data[0].lon;
-                    
-                    locationCache[locationName] = { lat: lat, lng: lon };
-                    saveCache();
-
-                    addToMap(item, lat, lon, false);
-                } else {
-                    const card = document.getElementById(`card-${itemId}`);
-                    if(card) {
-                        card.classList.remove('locating');
-                        card.classList.add('failed');
-                        card.querySelector('.status-text').innerText = '🔴 找不到地點';
-                        card.querySelector('.status-text').className = 'status-text status-error';
-                    }
-                }
-            })
-            .catch(err => console.error(err))
-            .finally(() => {
-                setTimeout(processQueue, 1200);
-            });
-    }
-
-    // --- 3. 主程式 ---
-    
-    fetch('bear_data.json?t=' + new Date().getTime())
-        .then(response => {
-            if (!response.ok) throw new Error("HTTP error " + response.status);
-            return response.json();
-        })
-        .then(data => {
-            const list = document.getElementById('news-list');
-            document.getElementById('progress-text').innerText = `讀取到 ${data.length} 筆資料，開始分析...`;
-
-            data.forEach((item, index) => {
-                const itemId = item.id || 'id-' + index;
-                item.id = itemId;
-
-                const card = document.createElement('div');
-                card.className = 'card locating'; 
-                card.id = `card-${itemId}`;
-                
-                let locName = extractLocation(item.title);
-                let displayTitle = item.title.length > 40 ? item.title.substring(0, 40) + "..." : item.title;
-
-                card.innerHTML = `
-                    <span class="status-text status-searching">🟡 搜尋中...</span>
-                    <h3>${displayTitle}</h3>
-                    <div class="meta">日期: ${item.date} | 地點判定: ${locName || "未知"}</div>
-                    <a href="${item.link}" target="_blank">閱讀新聞 (${item.source})</a>
-                `;
-                list.appendChild(card);
-
-                if (!locName) {
-                    card.classList.remove('locating');
-                    card.classList.add('failed');
-                    card.querySelector('.status-text').innerText = "🔴 無法解析地名";
-                    card.querySelector('.status-text').className = 'status-text status-error';
-                    return;
-                }
-
-                if (locationCache[locName]) {
-                    addToMap(item, locationCache[locName].lat, locationCache[locName].lng, true);
-                } else {
-                    fetchQueue.push({ item: item, locationName: locName, itemId: itemId });
-                }
-            });
-
-            if (fetchQueue.length > 0) {
-                processQueue();
-            } else {
-                document.getElementById('progress-text').innerText = "全部由緩存載入完成";
-            }
-        })
-        .catch(err => {
-            console.error("讀取 JSON 失敗:", err);
-            document.getElementById('news-list').innerHTML = `<div style="padding:20px; color:#ff4444;">讀取 bear_data.json 失敗。<br>${err.message}</div>`;
-        });
-
-</script>
-
-</body>
-</html>
+[
+{
+"id": "166d36f75a9b66a1032a8ce6049a3f10",
+"title": "【ヒグマ速報】出没が相次ぐ住宅街でまた"クマのような足跡"…警戒中の消防隊員が雪の上に残る足跡を発見…住宅からわずか20ｍ…冬眠はいつ？〈北海道小樽市〉 - Yahoo!ニュース",
+"location": "新聞報導地點",
+"lat": 43.066666,
+"lng": 141.35,
+"date": "2025-11-20 05:30:02",
+"link": "https://news.google.com/rss/articles/CBMif0FVX3lxTFBDdUhFWWtLdmVGYmZ4d2kwemFXMTdyalRkUUtnZkptc0ZGSTc2SWFGbVVCTGZEbk50bnI5c0o2UEdaNFFhTnctZmVwZ3F5V0NRcUEwSmpwZ29YRXE5dklDTlZFMVk4T2d5NmIzcmQzaEJtSmIzQUVSNTA2YVRKMW8?oc=5",
+"source": "Yahoo!ニュース"
+},
+{
+"id": "29ef780eabf926dfd74bad3c4a577cce",
+"title": "（秋田）秋田市外旭川八幡田でクマ出没 １１月２０日昼（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 39.716667,
+"lng": 140.1025,
+"date": "2025-11-20 05:23:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxQY0VMU3ExSUQwaU1qRDY0M0xvNWJTRnpoVUZrb1d1SF9ET3VZekVtRGplYzBTWEQ1OHZ0OXpTY1NOSmNYS0d1UTlubDFhR0psY2JZc3VaaWRQdVQtdU1qRHB5a2VKM2pCMjhuQ1JjdzBHekN0Zl9yUU5PSWVDYjMtMjlSc1piN1REVXNLREFJLTZobnFsM3dRbVlyY2o?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "7fa72b7794d7177f3cfc32115cf59a7a",
+"title": "（秋田）秋田市豊岩石田坂上野でクマ出没 １１月２０日午前（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 39.716667,
+"lng": 140.1025,
+"date": "2025-11-20 05:17:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxOOV9Id1NOMTl5N1dXRHVMTWR3WTI4S0l5aW45cXhuTVRZd1JlbG9NOTBYNVZ1WVpfcjBhZTA0UWxTODQ1MFV1QTI2Rk0xcnlOeU9WRXduLTR6RDJKemFJTTNoYVlOWU5DZzM1YTlrRU5KME1iX3dLYnF5YXh5cjZIcXJEanZGMmQwTmJHUmtSUTBzRHdOTmJIWVRlRno?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "779cc5c46fc0296aad15ef9ca802091e",
+"title": "（山形）川西町下奥田でクマ出没 １１月２０日昼（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 38.255556,
+"lng": 140.339722,
+"date": "2025-11-20 05:05:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxPUFpKS0ZLWlNaYlppNVpvQm1NYmpfSjhhUlRRZ25odzU3dGZoUXM2TFdHUHhNRUJTTURaSHdUckt2QXJZRzE1cE5PZEZ2TlhqVG54ZVJsREhWWXNKRS1xMFpxTFhfZ2FiN3BNVlNCTDYxTkVEa0R5bmoxWWMzejBDeW94eU9ySmdpbm1ERDc4a1ozb1RFM0YtVHpQZHo?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "c8bdeed556d5273c8274a021030621ed",
+"title": "（新潟）五泉市矢津矢津川でクマ出没 １１月２０日朝（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 37.902222,
+"lng": 139.023611,
+"date": "2025-11-20 04:31:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxOeHBzbGRISTNLRkJMWklLc29PWkpjQ1dXUUJteE5UdDV5T3A0SFFLWmN2T2ZLRGp0MUk2NXRPdkNFMHM0a3VTYlpVY2ZtUjlSaFkxeWZWRElybGZVT2NpUTBfMEJwNmJ5VTFYRzV4cm5MNjlzbFhSUWRSLXNIaXNEM3p4WUV1X1RTRVlQdUd5STYyTFdDYmZHLUEwb18?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "c755286f53fb4779c7b2debf50c8e8e2",
+"title": "（福島）郡山市熱海町熱海４丁目でクマ出没 １１月２０日昼前（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 37.760833,
+"lng": 140.474722,
+"date": "2025-11-20 03:26:00",
+"link": "https://news.google.com/rss/articles/CBMiogFBVV95cUxQS1ZkUE91UlplWDM3bGw2VXZUNzBWYkhJcVhlOUdMRHZZNFpXUnhpaUEzbHhCNXdpcVFvUTluS1gzTUdIb2wzVHB0Y0xPcmRXXy1kdVhQdGNfcDdjX2NlSE03SVpkbEVOdEJKVElQcm95YXRLczFlRUZFS0ZvMFppUHdRTnkta1lBWFR3VnBjT2o2WUxfeFllUGtHVnhqVDFueUE?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "0b4e7c594c06940c96e89c20aca16181",
+"title": "【熊出没】11月20日（木）福島県のクマ目撃情報 《随時更新》（福島テレビ） - Yahoo!ニュース",
+"location": "新聞報導地點",
+"lat": 37.760833,
+"lng": 140.474722,
+"date": "2025-11-20 02:24:44",
+"link": "https://news.google.com/rss/articles/CBMif0FVX3lxTE5wd2ZnMk9wQlFpWko5UDlJSGVOaVZ2ZnVCSUx5WGhReGdUS3BBQW9TS3Z2Q1VjTWw2d2xtZWNiclJQSUx6cGZRalBJZktpUi13cHhpbURsRHhvUVNvRG94cko4Rnp1Q09GeWN1eVN0XzNMSnJWLUQyWi1mYXJrUDg?oc=5",
+"source": "Yahoo!ニュース"
+},
+{
+"id": "b16a42c93d75e4634a6508d44a122c74",
+"title": "【熊出没】11月20日（木）福島県のクマ目撃情報 《随時更新》 - FNNプライムオンライン",
+"location": "新聞報導地點",
+"lat": 37.760833,
+"lng": 140.474722,
+"date": "2025-11-20 02:17:00",
+"link": "https://news.google.com/rss/articles/CBMiTEFVX3lxTE5EbTcwbVJneThFT3ExamNRRjh5N05LX1FlSjdScFRSclFudVNEVHpUYUNZcW85aVVqb1ZDX1k2cFo2b3k1ZV80bjZhZ0Y?oc=5",
+"source": "FNNプライムオンライン"
+},
+{
+"id": "92c902b1062f4c1a5b0912c2410c455e",
+"title": "【熊出没】11月20日（木）福島県のクマ目撃情報 《随時更新》（福テレNEWS） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 37.760833,
+"lng": 140.474722,
+"date": "2025-11-20 02:17:00",
+"link": "https://news.google.com/rss/articles/CBMihwFBVV95cUxPQURiNVdQVkthZnpDR215OHNsSWsxaHVXclhjVVV3RjIwSS1QTFcweUEwOC1zZEhKdGlTRUJlbEllaU00cHZlampOcG5JM1ZrdTU5TjVLMkROVENxNjJibTBTeEhDdXBBNEx4dC1YWmhtQkNlQl9pRGxsLXRXU3VDeDN2V1ZBRVU?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "4380d18ca778131c40420f2ea9fc6588",
+"title": "【クマの目撃】盛岡市本宮5丁目の盛岡市立病院付近 体長およそ1メートルの成獣 岩手県（11月19日午後11時35分ごろ） - 日テレNEWS NNN",
+"location": "新聞報導地點",
+"lat": 39.703611,
+"lng": 141.156389,
+"date": "2025-11-19 23:49:01",
+"link": "https://news.google.com/rss/articles/CBMihwFBVV95cUxPUVdPU1lwc1ZSb3Itc19jZXd0ZnZ4eXVmV0dPbWk0VjZYTVJXUDFaRWlXemYzajQwTVg0NHNER09NSjJ6eDBFY0VBN2Vnc2Nzamo4R2JONjU3bXJkeW4tblVpYWZmNGoweUtXYnVOX1VOS3ZNV3hUamF0NkxWY0NjaU04TmppMzA?oc=5",
+"source": "日テレNEWS NNN"
+},
+{
+"id": "187769fbaba32046ec79de8ba35c2f7a",
+"title": "クマは人間を食べるだけでなく｢子供をさらう｣…北海道の新聞が報道｢9年間クマに育てられた少女｣の真実 - PRESIDENT Online（プレジデントオンライン）",
+"location": "新聞報導地點",
+"lat": 43.066666,
+"lng": 141.35,
+"date": "2025-11-19 22:00:00",
+"link": "https://news.google.com/rss/articles/CBMiWEFVX3lxTE1pUjNMMEQ2Y3VuMEFVREIxcmhjVkREYll1S0FIRFlEN3RmMkpaRDRPdWxWcktpMlhTbThFTWZFQkR6dUVqczNwWHBBUFVQVnFPRUFvblBuem8?oc=5",
+"source": "PRESIDENT Online（プレジデントオンライン）"
+},
+{
+"id": "fbe8205eacd841094225e315439c663f",
+"title": "（福島）川俣町大綱木切畑でクマ出没の可能性 １１月１９日夕方（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 37.760833,
+"lng": 140.474722,
+"date": "2025-11-19 14:11:00",
+"link": "https://news.google.com/rss/articles/CBMiogFBVV95cUxOdXB2ek9yckx2OU5wTkV3elBzeGVWUTJUY21yWEJNeVByQzNxVERKTnNLN1dwYkxyd3pOZlJYbDJRMHczNUFlN2JjSGhBTmNrNFR6U3RHeHFOUTFteGlneEZjeUNEREJVMFZaS0hhejRWakh6cjRJYlpobFZEN0hTMzF4TVlNLVVBdTZsYUwtVDNHRmRJemQtN1BWbERpQ1RaY0E?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "15b8db63bcc66e6218d712867fd74ad5",
+"title": "（新潟）上越市岩木でクマ出没の可能性 １１月１９日夕方（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 37.902222,
+"lng": 139.023611,
+"date": "2025-11-19 14:03:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxQU2UxeklMSmw1YVdRcExoSFRiSm80cnBOOE1IeHdzbHlWa1UxcEl6N2dGTWdCNl9Yc0ZYemk3aXhRTldHdHhBVTRyMDhDSlRrek9vN0RIRXJxNHR4MTNXMjhwNllxLTBYOTVWai0tWUhqY2s1NFIzV1k3Q01GN19UQ1ZxLXRhc3lFWTYwTXZPOVZROHpKa3Y1WUVkUHk?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "bb7ad5fba4eb550228996a0301b78add",
+"title": "（群馬）沼田市大釜町でクマ出没 １１月１９日夕方（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 36.390556,
+"lng": 139.060278,
+"date": "2025-11-19 13:40:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxPa2dLaVVlNkw3QnBvOGx5RmFYakNNblAyZ0RMb3VfMTN3UjBCNkxITnlZcnIwa3Y4MmlIMFA5LXBnQk1ERS0ybDZGbHoybjdMMW5JcGZ0NnhRcDk5amY2UjdLWUdKN2VnQ1VaR1pBajEyV3A0dlRGekotSXhheVVUcmgwd2h5d0x4ZlJ2NU5IcjY0OG9UT3ZjTzN1ZWc?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "a76945316ab6043009c914c4b8320efe",
+"title": "（秋田）大仙市豊川上野でクマ出没 １１月１９日午後（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 39.716667,
+"lng": 140.1025,
+"date": "2025-11-19 13:18:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxPYmpDR0lXM25hZUZjSHJoQlVuY2p3Y0hPY2FnVnVmWm8yc0NUcUtNbU9UY3RheEFNZThZZW9JQkVJdEI3dnVHVWM0aGpjTEloTlp4SkJUckVCaDJaYWxxcU5wUEp0eHdPeVdSQ2lBaWczeXpnTm92OWZEUjNDOThZc19jTWc5QnBPOUtUNUw1UzRyczktVlQ0RVh0NWk?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "59427b6e63ab182422cabcbd89823724",
+"title": "（秋田）秋田市保戸野通町でクマ出没 １１月１９日夜（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 39.716667,
+"lng": 140.1025,
+"date": "2025-11-19 13:16:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxQdEJObWJxVC1SVHNMZzVGejdVNEc4Um5kSkNCbmR4THhBT09UQmZOREZuOE45dmFMVHMzUXB5UDRZQXRmaGdaWXdHd3ozbVlfZDVwdVZCaVQ4a1dTZ2N3SFVqdjhlTlJhbm04YTFWalJ6bTd6aUc0VTVIWTZORG5xSkhrb2dXdWFHVW5pYWlxY0hhMzlUR2M2aXhTS1A?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "bce6a0ee1270452ed3dc0349d5777e1c",
+"title": "（秋田）大仙市大曲西根上成沢でクマ出没 １１月１９日夕方（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 39.716667,
+"lng": 140.1025,
+"date": "2025-11-19 13:14:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxPS1BLRDctd05IblktNEhXYUxab2UzUmVkbmFmdGxITFRueFcwT1VXWU5POTZxVXdtVmlzTzVfR19qajhyalJqOVMwVmlmQ0RLRWdra19jQ0tPNFRpdEJPQXlIN1JobDNLSE45bEM0UDBfMXdfMWlhZ19OQjRTUnZ5VEJQTkVZRzVQWFFhWmoxSk1DdV9kdUljUTQwdGg?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "5d680de0da9d197edcd95640a1dfc1a8",
+"title": "（宮城）富谷市富ケ丘３丁目でクマ出没 １１月１９日夕方（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 38.268222,
+"lng": 140.869417,
+"date": "2025-11-19 13:08:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxPUllYZWxqbVN4aWZhNVNxeUVaN3RiVnhyT1hWTzRDcnVPQXVWUW9MYkczOV9SNlR6SlQ1ZWxaSXZuRzR2WURRdFhpY0F0YXJzMk8yVkd5ZUNwMXg2N3JiZm5GZE5RaWRhX3gwTmpPRzYtYjEtbkZwUVcxOF9sN05abHAwYTBBTmdjYzZOamN1ZEUtdGhPUTVGdVY4dVU?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "6a0e26a5c3af8cce0b9246a0a308fd24",
+"title": "（富山）南砺市松島でクマ出没 １１月１９日夕方（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 36.695278,
+"lng": 137.211389,
+"date": "2025-11-19 12:53:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxQcFJHS3FlSFB2TkJlTUVrRFk2VTUySDV1cUkxVkN3TDl6STZWV2ZteDhVWno4THQxUl9NVEkyMUhKeEZPeXROalRwZmFzWU5GRnN0TkZfOTNMcEdmZkE1RnZUQVE5b0ZtRDE5cjFEUjI2T3d6LUJhdGlKOXo3bjVnMk5lVzZrOENpM3FDd2FMYmtYbFBvZzhPWGVLbjU?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "2487ef8b0f0b12cee7336299007d83a4",
+"title": "（福島）平田村東山苅万田でクマ出没の可能性 １１月１９日夕方（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 37.760833,
+"lng": 140.474722,
+"date": "2025-11-19 12:52:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxONlI0STJ1V0htVHQwMzdtVG1mLVlxdmthZlBmVU10UzM1SjgxYjFxMU1URjdNd1A5T0RXbFhGR2NrNU4yT1dCSG1xRk5jd1pScUo3UHdkQk1DMkl4STU0Mm9CRmViSXR3QjB2ZXNVVzJiLXRpaXhOcXVFOThzUlBTT0FJVlczRS1mVWFGTmoyR2ZSZWZkRmdhT2czaXQ?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "7f5cd4a08873a5ee375540e863090baa",
+"title": "（群馬）みなかみ町月夜野でクマ出没 １１月１９日夕方（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 36.390556,
+"lng": 139.060278,
+"date": "2025-11-19 12:39:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxOaDhXNzRxVF9oWEN1RWdxZjdUTkRhS0c1U2FTQ21vcUs1dHRsRVZIelQ5d25UZzVMZXRpVFBHZ0dGZmRRQWxJNHNZWTU0U3NLVUtkbmZyYnh3WXJQbWVzRGx6a3QzRkNRcUFVLWFDUnFLTDRNV2RQSDh5S0RMQ2FUdXRCVmd0WVk1c0ZzbFIwclI2bWhYNnpRdzNDMEg?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "de97f4d41dc9853084f1ce3f6cfb43ee",
+"title": "秋田「竿燈大通り」周辺でも熊目撃相次ぐ - 河北新報オンライン",
+"location": "新聞報導地點",
+"lat": 39.716667,
+"lng": 140.1025,
+"date": "2025-11-19 11:27:00",
+"link": "https://news.google.com/rss/articles/CBMiYEFVX3lxTE9kOGQ3TTJRaFRQdWNaUl9ueFpEVFY3azJrd1E2MGdFdi0wZ2hENkRfejQwang3bWVxTEVxMk1Oc0ZuUEQ5dVBudHJZTzQ1RXNEUk0wNmhSN2Nqa3NHSnpGcg?oc=5",
+"source": "河北新報オンライン"
+},
+{
+"id": "b9356c8ed44c0fda0a9877061ff3b639",
+"title": "クマ出没件数が過去最多の3000件超･･･県がクマ被害に対する緊急対策、捕獲するための支援策【新潟】 - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 37.902222,
+"lng": 139.023611,
+"date": "2025-11-19 10:26:00",
+"link": "https://news.google.com/rss/articles/CBMickFVX3lxTE9MckxSWXFHSGQ3Q1VEQm1jTW0zdFNrSERPaXRUbFlzOGFoTmRvZnhKYnhBWU9uOENRamdaMHd6akdUMzRkYU9taW1nSUFFSTBfY2F3Z0JCZEV1bVNhU2ZvckdFazNIZ0ZocjhUcXdFWnZJQQ?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "ec52fccdf1e9eff34ec28d0e7b96cf38",
+"title": "【クマの目撃情報】盛岡市高松3丁目 盛岡三高前の通り 子グマ1頭が東に立ち去る 被害なし 岩手県（11月19日午後5時50分ごろ） - 日テレNEWS NNN",
+"location": "新聞報導地點",
+"lat": 39.703611,
+"lng": 141.156389,
+"date": "2025-11-19 09:38:00",
+"link": "https://news.google.com/rss/articles/CBMihwFBVV95cUxON1pLcmFyM0JaUTJtd1k1RE9JdnlxakZ4bXVEOGg4eHh6T3lQOUh5VXVmNTBHR1BrZEE2RjNMZ2FjcDFfalcyWmJCMXJjdlpXR2I1VU1xaHRwNEZEaWo4Xy1hYXBDbEVmVHRXODdiM3lQZmk3ckZwMEhudGdvc0xMem5kUVhzU2s?oc=5",
+"source": "日テレNEWS NNN"
+},
+{
+"id": "fc01b130bae84bcd385af63c04f801c2",
+"title": "能代市能代町の市道にクマ 散歩中の８０代男性が目撃 - 秋田魁新報電子版",
+"location": "新聞報導地點",
+"lat": 39.716667,
+"lng": 140.1025,
+"date": "2025-11-19 09:20:08",
+"link": "https://news.google.com/rss/articles/CBMiYkFVX3lxTE50eTA3bDlxc21HdTlJSnBiZ2VrRXBiZVMxRmxsdVU2Y0pPSDk2QlNOUnJFS1RnY0p2dE15eENSVkJOS0ZnTWhrWmp5V0g5WGZtSGlocmxMOEkyaDFQckFMVDhB?oc=5",
+"source": "秋田魁新報電子版"
+},
+{
+"id": "8e8948fe7d14ce03089992c036107524",
+"title": "秋田市中心部でクマの目撃相次ぐ クマ出没で高校も臨時休校 （AAB秋田朝日放送） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 39.716667,
+"lng": 140.1025,
+"date": "2025-11-19 09:04:00",
+"link": "https://news.google.com/rss/articles/CBMibEFVX3lxTE5OWUtSTTE1cjlkRUk3S2dhYWFoQkcwek5QVDgwX0pWT05uM1VzWmRic2xXbWJ2RUExRkFabzNTMTJuZktGQUVJQjRvTnhMWlZpelhrUWMxNVhPN2M2TVh0TzFlaGswSVpNN3pPSg?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "4adb9e81e714bfd0dcbc6796343065bb",
+"title": "（富山）上市町湯崎野でクマ出没 １１月１９日夕方（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 36.695278,
+"lng": 137.211389,
+"date": "2025-11-19 09:03:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxORjhWZzFPRk9LMXA5cUJrU19EQ1p4VDhfaXVVSHhCaEZ5eERIaDJyZmU1MXhUWmsxd1JMSTc4REU4R2laWTdwM0VOc2JIZVBJR1ZXZWZlX25aakJzUDgweS1QOTFtRW5oeDlpalI5RDgtLXpXTmdsekxuQlE1QThCbTRJaXpWVEVKN3YzMFhDM3NBNlFtOWZtcFQyVmo?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "3d5dd8be844afda50f3639e2feab33a0",
+"title": "（山形）東根市東根甲でクマ出没 １１月１９日夕方（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 38.255556,
+"lng": 140.339722,
+"date": "2025-11-19 08:58:00",
+"link": "https://news.google.com/rss/articles/CBMi8gFBVV95cUxPeWIyUk1zZFhyMDRYNGxIWG5CbF9UWDRBNVhxZXJXb3d5Z3hNd05UMmROYkRkQkF5QjMzT0VCanJjU0M5VU83b1NjV00ybjFtY0tQZXZGeWdnSTNwSWlweHBlTnJBaFVTRm9rQ05yQnJETUlWN3dZa2pacl91VS16WFdiUU1SdGNDVzlKWWJPUDBOTEVad0Z6cWVUbjZicERHZjEwM3pHVklRMjhPcXV1ZDJfZU1JUVlyUU9tX01TUjNsUUtQRlRmcHcxR0tzRnNrOVd6X3RLZzYyZXRsZVV2N1Z5eGNGU2I5MlFPTld6a1JrZw?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "337250bd8d533fb6b2881954889b6569",
+"title": "（岩手）釜石市甲子町第５地割でクマ出没 １１月１９日夕方（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 39.703611,
+"lng": 141.156389,
+"date": "2025-11-19 08:49:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxQTU1UTzBRY29DOU43endMZTc4akNVRHBSSk5zRFF2dEVjbFMwMktiUFAyZzZFaWE3LTF3UUxNWUJOYXBSbEJac3Bxa3FOTnVaTFZjTW5hUFlkSGltWFYxRURfMk1xV0JsWXd6SEVtU0dwQTdaSXVfenYydGRzZXhEcHc5cVpVcC1yMHFFc1hPanQtVGlLZTMxMTdUZVM?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "d0efc82c7acdf9350ecb6aac1576695a",
+"title": "（岩手）奥州市胆沢若柳野山田でクマ出没 １１月１９日午後（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 39.703611,
+"lng": 141.156389,
+"date": "2025-11-19 08:13:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxNRGIxSVZrcFhicllKYTVRR19aVThQckdTOW52WEZPTHgxUVFsOUREUTFESThsX3FydmNnWVZQQkNLcXNmb2MzeF9XaEtHVDdsVjFvdDFsRXNZbnQwYlRxeXRWTmw5MkE3VXRPSE05dWRra2FldU9NMnhxbEpjcXgwMDd2bW45Uzl3OWtfNlctRkpBRWQwajNYZU5SRUc?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "0c5a682a1c20367714181e6a4207bda7",
+"title": "クマ出没いつまで？ 人里に出るクマは冬眠遅れる可能性も 観光に暗い影… キャンセル相次ぐ〈宮城〉（仙台放送ＮＥＷＳ） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 38.268222,
+"lng": 140.869417,
+"date": "2025-11-19 07:55:00",
+"link": "https://news.google.com/rss/articles/CBMib0FVX3lxTE5nc1E0T0RVMm5GTFFvOEY4NUNvRkhhTXhoX1RDbG56X1diNnVNX2tRMWZaZjMzZ0VRNGFYLWJiTldPUTFMQW8zTDBQM0Jwd0RrQTlHT3g1dGdJUVNBZTdNcVN3TGhlVVd1Q3UwaFpfaw?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "f94aa58a2489af8ae5ee6f2fb29cb595",
+"title": "（新潟）阿賀野市小松でクマ出没 １１月１９日夕方（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 37.902222,
+"lng": 139.023611,
+"date": "2025-11-19 07:50:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxQVmRpV3lYN0VvcmJXN3RpY1FOS1pfNGN6RlRuQlN4LW4zSkxjVkZJRHJnVFlmZjF3ck0wOTJ4N3ZjbUVQbjNBek91S05yWHZYV2VlS09MdzRuNVRqMVpNemNWaEFTZDNuQVMxZER0OENNUkJSc0JwN2VYTXNIb3dRMHFqakZVX0t4X1c3b1RpTXVwMnhHTW1GWlJJLXg?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "86acc126d187f216d5ffb71ea4d326e9",
+"title": "（福島）郡山市逢瀬町河内下石田町でクマ出没 １１月１９日朝（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 37.760833,
+"lng": 140.474722,
+"date": "2025-11-19 07:47:00",
+"link": "https://news.google.com/rss/articles/CBMiogFBVV95cUxPRW5YcGtIaFlUVDVRV2Ixc0U3ZDNicjdqVDVtZ292enh3NnE1bUl2bXdaTloyVUg5bVdDUm5sbTRPZFhhNjlKRzJOYmZDeUxTS1BNQWdINGx1dS1wc09LZDktRHM4Q3RwaTlIb0dIbjk1OHpxYm5ienlFUDB6d2dsZGdBTVd2OHRMSkJfajZnUV9rbHM2QktlbTBRUlc1N195Z0E?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "86393d9052e2a3cbde0e2cbd59bec2d9",
+"title": "（秋田）秋田市河辺岩見鍛治屋敷でクマ出没 １１月１９日昼前（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 39.716667,
+"lng": 140.1025,
+"date": "2025-11-19 07:45:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxPMlg0YlpaSWlKYmtzUGhVZ1pOTEJBaksxcU9ZRnREQzlKUU9vUGdWdnFvTzVWeWNvNU9XR2R5ZDRlUHVMWlpodVhtWG1iQUpySlluQ3A3MGFlZUVRRFBWSkc0MVh5SHhOLVJ2M3NlZmxNd1RIcUxoR2xaQlpuSFk5VWNxQzNaWnpUSU9yZFk2clQxZ0lSTGpTTXFTSFM?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "5d4186eb7596a4284a7be6f1285425c2",
+"title": "（秋田）秋田市千秋公園でクマ出没 １１月１９日朝（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 39.716667,
+"lng": 140.1025,
+"date": "2025-11-19 07:45:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxPLVJqT2hrcTRfQjJqVS05RzA4SllmVVRzeDRoY0NYZDZSc1BkVk9WdTdkUHdreHZyRm1lSHJtOFJKTi1KdE90Q3prdWUyUlU2bUhld2RreEZsaU8zSGJhajNRYlNkTWdFNVVYUTVxUlptQkRjMkpXWEJnMlV1Uk1tcnhkRkZXY01WVmtxYnROcm81QnBDY2VpcVBnVWg?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "bbf4afdf1b524cd842a14772fd773258",
+"title": "（秋田）大仙市花館間倉でクマ出没 １１月１９日午後（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 39.716667,
+"lng": 140.1025,
+"date": "2025-11-19 07:44:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxNOHZ5c0EwWWg4djNGREYyNDJVUHhmTkR5VVY5V3VkQTJ3TGljSEZQQ0dMeUM0ejlUZEE5ZmdiOU0xQmtUQUs5WV9oZUxudTd3VFpNM194Y2dwQmh3QzRGcEtlc2FjVkhJNnp2eHg4cGpuMkQwS3dZNWhmVGFFY3lnaGpkWVF3eEd3SVFaNmNFdzFZZ1hLQWhHbGR2cVo?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "3f01c6584d605a8958f6aae3b061ec0e",
+"title": "（秋田）秋田市千秋矢留町でクマ出没 １１月１９日朝（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 39.716667,
+"lng": 140.1025,
+"date": "2025-11-19 07:43:00",
+"link": "https://news.google.com/rss/articles/CBMi8gFBVV95cUxQRGpIa1hGMFZ0RzA4RmtaejNFZDVybWRPOHdKalp5YmxxcnhxVzN5MGtCQ0pYN2xBbWpidkV2OFhXUWtDTi1RRDdFelo2djREZlNCUjNSeDB4NU05eXpLSHJiNEhFZjRycERiWUp2LU5mUEwwZGt4Qmk2dkRXQU5lSVlGWmFEeWNEbVhfbmJHSlJad0pwWDhtdTkzYXZHZlNvYVFmUnJUckVUSXdWNjhSX05PSXEyUDBSUXpPcXJTcXl1U3hvbnFTa0s0RlA3R1BZLXZZc3RYNFZ0M19nZHFyYzRUTFhrdGw1cEZvYkZ6SUxQQQ?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "a7df8799cef1e91b3a0a47a724c3e123",
+"title": "（秋田）北秋田市前山萩岱でクマ出没 １１月１９日午前（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 39.716667,
+"lng": 140.1025,
+"date": "2025-11-19 07:42:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxNQmNwTDExcl9FUzluelhLR0R5TWRCbi1vcEdkNDJyY0xQU0FnZTdLUmFsb05kdzRzZXp4VzNPREt3TFZVYmpSclZNTjVsSFROX25DOUNHTVFMUDhOcTJvVndVZFZIWk9hOWFCSkg4a29uWUVMNjBtdWxJV25TNkgyS3gyeENzc0p4Z25sc0paNW9iVWlwcTE4STZrRzA?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "1d1ecb0ab58aaf5c97ef3b171c09922c",
+"title": "（秋田）東成瀬村田子内上野でクマ出没 １１月１９日未明（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 39.716667,
+"lng": 140.1025,
+"date": "2025-11-19 07:41:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxPUlFkNmtGaVY4b3FYekVjMVR2QWFpSTBZaXViTlctU25BcWlmOG5hSmNULWY4YkU3X0EzRUY1REJ1MlgtZWxDUzdQRmlFSWVHUG5UYW5hWDRJbTNPcDlJaVpUaUpVR2dTU05MSm8xaEpuQ0lYWUpET0lzZUdaQmsxWF9weENWUS16cHlsZkFPRjBTRUhVcGw1MEZhRi0?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "774d8e3736ff2d9f735967f2e546502d",
+"title": "（秋田）秋田市飯島飯田２丁目でクマ出没 １１月１９日午後（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 39.716667,
+"lng": 140.1025,
+"date": "2025-11-19 07:39:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxONDEyMnB3Qkh2MjVjYXYwOHFwZGdkbzdjN2JETl8tZW43QkptS1JzUWRtZzMxMnNOdUUtelVLR0p1X2JLVVBFcVZaX084eTJ4bnNheXVCU21remJFTFBBNFRXeUF6Z0hRNVgtQXVtVmVpVEFPak1IXzRSM2hDdHdNNHZGS0RLd1VjdWlKemMxTzJjcEFVLU5JM211UFY?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "3266d4de4827f273c110e24f303fdfc1",
+"title": "（秋田）大館市上代野八幡岱でクマ出没 １１月１８日夜（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 39.716667,
+"lng": 140.1025,
+"date": "2025-11-19 07:38:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxNQS1mYUI1MnhlbjhpaVM1NTFVek04WEhuTGxCNzFQaXk2Qll0eWI5VmRLTnRaOGdNcUhnVUJBX3pGYmFFeUxzNmFaUEtrekJqaEF0YW1yZU80eFU5VzJRUExfSWVRQXhqSnZtYm4xWG43V29DRU1MeVB5b3RVVWZLRFdDTmJVOVZLM2lNQUd5aXdxWUx6TFhVV2lTNXQ?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "154da110724fba05183b3e5a9036f616",
+"title": "（青森）むつ市川内町休所でクマ出没 １１月１９日午後（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 40.822222,
+"lng": 140.7475,
+"date": "2025-11-19 07:25:00",
+"link": "https://news.google.com/rss/articles/CBMirwFBVV95cUxNX0tjanNWWXRqenFzQzk1V2RCNnZnb014YW9YTHFibWRnN2dKUzlOSGpYQzhiU3doU2RwUGN6NE5rYTM4bjl4RkZDT1NsNnJtTEtob0RWWUllNldRLWkwcHRtcjd3a3Y4NlBZU1VUUGI0Q0hibEdQUWgwZnViSUx4YV9YQUdWNUU0czFMYzc4MVJVSmdWM3J2RWNnUHRmZXFlSmZsQk5nN3NJLXdMalpr?oc=5",
+"source": "ｄメニューニュース"
+},
+{
+"id": "8081e13a0cd3b33d819cdf373f37f4e7",
+"title": "（福島）会津美里町雀林新田屋敷でクマ出没 １１月１９日昼過ぎ（日本不審者情報センター） - ｄメニューニュース",
+"location": "新聞報導地點",
+"lat": 37.760833,
+"lng": 140.474722,
+"date": "2025-11-19 06:50:00",
+"link": "https://news.google.com/rss/articles/CBMinAFBVV95cUxPLWpBMkl6OFpNLUhLRXpUZVhSZnl6WkFPLUZUYnNuU2wzYzRua1Qybm96YU54cmQyWWtNaFExRHE1NWh3eThIS1NSRE5hQVNwZnlSdHFZTHdtQmZ3Z3dKMmRoUE9CVmV5djA2UHVfcDRFcUwtQmw2aWVTVkI2OHZ2U21lVnA4TVU2Y29LUm83RW9GLVZLemVHZ2NJOEU?oc=5",
+"source": "ｄメニューニュース"
+}
+]
