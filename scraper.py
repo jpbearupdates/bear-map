@@ -3,30 +3,23 @@ import json
 import datetime
 import os
 import hashlib
-import re
+import time
+import google.generativeai as genai
+from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderTimedOut
 
 # 1. 設定檔案路徑與 RSS 來源
 DATA_FILE = 'bear_data.json'
 RSS_URL = 'https://news.google.com/rss/search?q=熊+出没+when:1d&hl=ja&gl=JP&ceid=JP:ja'
 
-# 2. 簡易座標對照表 (實際專案建議接 Google Maps API 或 Nominatim)
-PREFECTURE_COORDS = {
-    "北海道": {"lat": 43.066666, "lng": 141.35},
-    "札幌":   {"lat": 43.061771, "lng": 141.354506},
-    "青森":   {"lat": 40.822222, "lng": 140.7475},
-    "岩手":   {"lat": 39.703611, "lng": 141.156389},
-    "宮城":   {"lat": 38.268222, "lng": 140.869417},
-    "秋田":   {"lat": 39.716667, "lng": 140.1025},
-    "山形":   {"lat": 38.255556, "lng": 140.339722},
-    "福島":   {"lat": 37.760833, "lng": 140.474722},
-    "長野":   {"lat": 36.648056, "lng": 138.194722},
-    "新潟":   {"lat": 37.902222, "lng": 139.023611},
-    "富山":   {"lat": 36.695278, "lng": 137.211389},
-    "石川":   {"lat": 36.594444, "lng": 136.625556},
-    "福井":   {"lat": 36.064722, "lng": 136.219444},
-    "群馬":   {"lat": 36.390556, "lng": 139.060278},
-    "栃木":   {"lat": 36.565833, "lng": 139.883611}
-}
+# 設定 Gemini API 金鑰 (從 GitHub Secrets 讀取)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+# 初始化 Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    print("⚠️ 警告: 未檢測到 GEMINI_API_KEY，將無法進行地點解析。")
 
 def load_data():
     if not os.path.exists(DATA_FILE):
@@ -40,17 +33,49 @@ def save_data(data):
     with open(DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
-def get_coordinates(text):
+def ask_gemini_for_location(title):
     """
-    從標題或描述中提取地名並返回座標。
-    這是一個簡化版，優先匹配具體城市，再匹配縣。
+    使用 Gemini AI 從新聞標題中提取最精確的日本地點名稱。
     """
-    for place, coords in PREFECTURE_COORDS.items():
-        if place in text:
-            # 為了避免所有點都重疊，這裡可以加入微小的隨機偏移 (jitter)
-            # 但為了演示清晰，先直接返回中心點
-            return coords
-    return None # 找不到地點
+    if not GEMINI_API_KEY:
+        return None
+
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash') # 使用較快且便宜的模型
+        prompt = f"""
+        你是一個日本地理專家。請從以下新聞標題中提取最詳細的「出沒地點」。
+        規則：
+        1. 只回傳地點名稱（例如：北海道札幌市、秋田県北秋田市）。
+        2. 不需要任何解釋或額外文字。
+        3. 如果標題中完全沒有具體地點，請回傳 "None"。
+        
+        新聞標題: {title}
+        """
+        response = model.generate_content(prompt)
+        location_text = response.text.strip()
+        
+        if "None" in location_text or not location_text:
+            return None
+        
+        # 清理可能多餘的符號
+        return location_text.replace("\n", "").replace("。", "")
+    except Exception as e:
+        print(f"❌ Gemini API 錯誤: {e}")
+        return None
+
+def get_coordinates_from_address(address):
+    """
+    使用 Geopy (OpenStreetMap) 將地址轉換為經緯度
+    """
+    geolocator = Nominatim(user_agent="bear_map_bot_v1")
+    try:
+        # 加上 "Japan" 確保搜尋範圍在日本
+        location = geolocator.geocode(f"{address}, Japan", timeout=10)
+        if location:
+            return {"lat": location.latitude, "lng": location.longitude}
+    except (GeocoderTimedOut, Exception) as e:
+        print(f"⚠️ Geocoding 錯誤 ({address}): {e}")
+    return None
 
 def update_feed():
     print(f"🔄 開始抓取新聞: {datetime.datetime.now()}")
@@ -68,25 +93,35 @@ def update_feed():
 
         title = entry.title
         published = entry.published_parsed
-        # 將 struct_time 轉為字串
         pub_date = datetime.datetime(*published[:6]).strftime("%Y-%m-%d %H:%M:%S")
         
         # 簡單過濾：只抓取標題含有「熊」或「クマ」的新聞
         if "熊" not in title and "クマ" not in title:
             continue
 
-        # 嘗試解析地點
-        coords = get_coordinates(title)
+        print(f"🔍 分析中: {title}")
+
+        # 1. 使用 Gemini 提取地點文字
+        extracted_location = ask_gemini_for_location(title)
         
-        # 如果找不到地點，預設不加入，或者可以設為日本中心點並標記為「地點未詳」
+        if not extracted_location:
+            print(f"   ⏭️ 跳過: 無法提取地點")
+            continue
+            
+        print(f"   📍 Gemini 提取地點: {extracted_location}")
+
+        # 2. 將地點文字轉為座標
+        coords = get_coordinates_from_address(extracted_location)
+        
         if not coords:
+            print(f"   ❌ 跳過: 找不到該地點的座標")
             continue 
 
-        # 建立新數據物件
+        # 3. 建立新數據物件
         new_item = {
             "id": hashlib.md5(entry.link.encode()).hexdigest(),
             "title": title,
-            "location": "新聞報導地點", # 這裡可以更進階用 NLP 提取
+            "location": extracted_location, # 儲存乾淨的地點名稱
             "lat": coords['lat'],
             "lng": coords['lng'],
             "date": pub_date,
@@ -95,7 +130,10 @@ def update_feed():
         }
         
         new_entries.append(new_item)
-        print(f"✅ 發現新目擊: {title} ({pub_date})")
+        print(f"   ✅ 成功加入資料！")
+        
+        # 禮貌性暫停，避免對 Geocoding API 請求過快
+        time.sleep(1)
 
     if new_entries:
         current_data.extend(new_entries)
