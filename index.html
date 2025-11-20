@@ -72,9 +72,23 @@
             document.getElementById('last-updated').innerText = `數據截至: ${new Date().toLocaleString()}`;
 
             data.forEach(item => {
-                // 建立 Marker
-                const marker = L.marker([item.lat, item.lng], {icon: bearIcon})
-                 .bindPopup(`<b>${item.location}</b><br>${item.date}<br><a href="${item.link}" target="_blank">新聞連結</a>`);
+    // --- 加入呢幾行 ---
+    // 0.008 大約等於幾百米，令個點隨機散開少少
+    const offset = 0.008; 
+    const jitterLat = item.lat + (Math.random() - 0.5) * offset;
+    const jitterLng = item.lng + (Math.random() - 0.5) * offset;
+    // ----------------
+
+    // 注意：下面個 L.marker 入面要改用 jitterLat 同 jitterLng
+    const marker = L.marker([jitterLat, jitterLng], {icon: bearIcon})
+        .bindPopup(`<b>${item.location}</b><br>${item.title}<br><small>${item.date}</small><br><a href="${item.link}" target="_blank">新聞連結</a>`);
+
+    markers.addLayer(marker);
+    
+    // 下面 Card 嘅 code 唔洗郁...
+    const card = document.createElement('div');
+    // ...
+});
 
                 // 重點：將 Marker 加入聚合群組，而唔係直接 addTo(map)
                 markers.addLayer(marker);
