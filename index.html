@@ -3,27 +3,56 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>全日本熊出沒地圖 (自動定位版)</title>
+    <title>全日本熊出沒地圖 (即時數據版)</title>
     
+    <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <!-- MarkerCluster CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
 
     <style>
         body { margin: 0; display: flex; height: 100vh; font-family: "Microsoft JhengHei", sans-serif; background: #1a1a1a; color: #e0e0e0; }
-        #map { flex: 3; height: 100%; }
-        #sidebar { flex: 1; padding: 20px; overflow-y: auto; background: #2d2d2d; box-shadow: -2px 0 10px rgba(0,0,0,0.5); }
+        #map { flex: 3; height: 100%; z-index: 1; }
+        #sidebar { flex: 1; padding: 20px; overflow-y: auto; background: #222; box-shadow: -2px 0 10px rgba(0,0,0,0.5); z-index: 2; }
         
-        .card { background: #3d3d3d; margin-bottom: 15px; padding: 15px; border-radius: 8px; border-left: 5px solid #888; transition: all 0.3s; }
-        .card.located { border-left-color: #44ff44; } /* 成功定位變綠色 */
-        .card.searching { border-left-color: #ffff44; } /* 搜尋中變黃色 */
+        /* Header */
+        .header { margin-bottom: 20px; border-bottom: 1px solid #444; padding-bottom: 10px; }
+        .header h2 { margin: 0; color: #fff; display: flex; align-items: center; gap: 10px; }
+        .status-bar { font-size: 0.85em; color: #aaa; margin-top: 8px; display: flex; justify-content: space-between; }
         
-        .card h4 { margin: 0 0 5px 0; color: #fff; font-size: 1.1em; }
-        .card .meta { font-size: 0.85em; color: #aaa; margin-bottom: 8px; }
-        .status-tag { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 0.75em; margin-top: 5px; background: #444; color: #ccc;}
-        
-        .loader { border: 2px solid #f3f3f3; border-top: 2px solid #3498db; border-radius: 50%; width: 12px; height: 12px; animation: spin 1s linear infinite; display: inline-block; margin-right: 5px; }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        /* Card Design */
+        .card { 
+            background: #333; 
+            margin-bottom: 15px; 
+            padding: 15px; 
+            border-radius: 6px; 
+            border-left: 5px solid #555; 
+            transition: all 0.3s ease;
+            position: relative;
+        }
+        .card.locating { border-left-color: #ffcc00; } /* 搜尋中 - 黃色 */
+        .card.located { border-left-color: #00cc66; }  /* 已定位 - 綠色 */
+        .card.failed { border-left-color: #ff4444; }   /* 失敗 - 紅色 */
+
+        .card h3 { margin: 0 0 8px 0; font-size: 1rem; line-height: 1.4; color: #fff; }
+        .card .meta { font-size: 0.8em; color: #bbb; margin-bottom: 5px; }
+        .card .status-text { font-size: 0.75em; font-weight: bold; float: right; }
+        .status-searching { color: #ffcc00; }
+        .status-success { color: #00cc66; }
+        .status-error { color: #ff4444; }
+
+        .card a { color: #66b3ff; text-decoration: none; font-size: 0.9em; display: inline-block; margin-top: 5px; }
+        .card a:hover { text-decoration: underline; }
+
+        /* Cluster Color Override */
+        .marker-cluster-small, .marker-cluster-medium, .marker-cluster-large {
+            background-color: rgba(255, 100, 100, 0.6) !important;
+        }
+        .marker-cluster div {
+            background-color: rgba(200, 0, 0, 0.8) !important;
+            color: white;
+        }
 
         @media (max-width: 768px) {
             body { flex-direction: column; }
@@ -36,24 +65,31 @@
 
 <div id="map"></div>
 <div id="sidebar">
-    <h2 style="color: #ff4444;">🇯🇵 全日本熊出沒情報</h2>
-    <p style="font-size: 0.9em; color: #aaa;">系統會自動分析地名並搜尋座標。<br>第一次載入可能需要少少時間。</p>
-    <div id="status-bar" style="margin-bottom: 10px; font-size: 0.8em; color: #44ff44;"></div>
+    <div class="header">
+        <h2>🐻 智能熊出沒監測</h2>
+        <div class="status-bar">
+            <span id="progress-text">讀取數據中...</span>
+            <button onclick="clearCache()" style="background:none; border:none; color:#666; cursor:pointer; font-size:0.8em; text-decoration:underline;">清除緩存</button>
+        </div>
+    </div>
     <div id="news-list"></div>
 </div>
 
+<!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 
 <script>
-    // 1. 初始化地圖：視角設在日本中心
-    const map = L.map('map').setView([36.2048, 138.2529], 5); 
-    
+    // --- 1. 初始化地圖 ---
+    const map = L.map('map').setView([38.0, 138.0], 5);
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
         attribution: '© OpenStreetMap, © CARTO'
     }).addTo(map);
 
-    const markers = L.markerClusterGroup();
+    const markers = L.markerClusterGroup({
+        maxClusterRadius: 40,
+        spiderfyOnMaxZoom: true
+    });
     map.addLayer(markers);
 
     const bearIcon = L.icon({
@@ -65,142 +101,193 @@
         shadowSize: [41, 41]
     });
 
-    // 2. 模擬全日本各地的亂數據 (全部故意無座標，或者座標錯誤)
-    const mockData = [
-        { location: "北海道札幌市南区でヒグマ目撃", title: "住宅街付近", date: "2025-11-20", source: "NHK" },
-        { location: "秋田県大仙市大曲でクマ出没", title: "河川敷", date: "2025-11-19", source: "Police" },
-        { location: "東京都八王子市高尾山付近", title: "登山道", date: "2025-11-18", source: "Twitter" },
-        { location: "長野県軽井沢町でクマ", title: "別荘地", date: "2025-11-18", source: "News" },
-        { location: "京都府京都市左京区", title: "山間部", date: "2025-11-17", source: "Local" },
-        { location: "熊本県熊本市西区", title: "みかん畑", date: "2025-11-16", source: "Police" },
-        { location: "岩手県盛岡市", title: "市街地縁辺", date: "2025-11-19", source: "NHK" }
-    ];
+    // --- 2. 核心邏輯：Regex + Cache + API ---
 
-    // 3. 本地緩存 (LocalStorage) - 避免重複 Call API
-    // 格式: { "北海道札幌市": {lat: 43.06, lng: 141.35}, ... }
-    const GEO_CACHE_KEY = 'bear_map_cache_v1';
-    let geoCache = JSON.parse(localStorage.getItem(GEO_CACHE_KEY)) || {};
+    // 緩存系統
+    const CACHE_KEY = 'bear_map_cache_v2'; // 升級 key 版本
+    let locationCache = JSON.parse(localStorage.getItem(CACHE_KEY)) || {};
 
     function saveCache() {
-        localStorage.setItem(GEO_CACHE_KEY, JSON.stringify(geoCache));
+        localStorage.setItem(CACHE_KEY, JSON.stringify(locationCache));
+    }
+    
+    window.clearCache = function() {
+        localStorage.removeItem(CACHE_KEY);
+        alert('緩存已清除，請刷新頁面重新抓取。');
+        location.reload();
     }
 
-    // 4. 從字串提取地名 (Regex)
-    // 嘗試提取 "XX県XX市" 或 "XX都XX区" 或 "XX市"
-    function extractPlaceName(text) {
-        // 簡單的正則表達式，匹配常見日本地名格式
-        // 優先匹配：縣/都/府/道 + 市/區/町/村
-        const regex = /([一-龠]+[都道府県])?([一-龠]+[市区町村])/;
-        const match = text.match(regex);
+    // Regex 提取地名
+    function extractLocation(title) {
+        // 策略 1: 括號內的內容 (通常是縣市)
+        const parenMatch = title.match(/（(.*?)）/);
+        let region = "";
+        if (parenMatch) {
+            region = parenMatch[1];
+        }
+
+        // 策略 2: 抓取 "XX県XX市" 或 "XX市XX町"
+        const geoRegex = /(北海道|青森|岩手|宮城|秋田|山形|福島|茨城|栃木|群馬|埼玉|千葉|東京|神奈川|新潟|富山|石川|福井|山梨|長野|岐阜|静岡|愛知|三重|滋賀|京都|大阪|兵庫|奈良|和歌山|鳥取|島根|岡山|広島|山口|徳島|香川|愛媛|高知|福岡|佐賀|長崎|熊本|大分|宮崎|鹿児島|沖縄)[県府都道]?.*?([市町村区])/;
+        
+        const match = title.match(geoRegex);
         
         if (match) {
-            // 如果有縣名+市名 (e.g. 秋田県大仙市) -> 返回全名
-            // 如果只有市名 (e.g. 大仙市) -> 返回市名
-            return match[0]; 
-        }
-        return null;
-    }
-
-    // 5. 查詢座標函數 (使用 OpenStreetMap Nominatim API)
-    async function fetchCoordinates(query) {
-        if (!query) return null;
-
-        // 檢查緩存
-        if (geoCache[query]) {
-            console.log(`[Cache Hit] ${query}`);
-            return geoCache[query];
-        }
-
-        // 呼叫 API (加延遲避免被 Ban)
-        await new Promise(r => setTimeout(r, 1200)); // 1.2秒延遲
-        
-        try {
-            const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`;
-            const response = await fetch(url, { headers: { "User-Agent": "BearMapDemo/1.0" } });
-            const data = await response.json();
-
-            if (data && data.length > 0) {
-                const coords = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
-                // 寫入緩存
-                geoCache[query] = coords;
-                saveCache();
-                return coords;
+            return match[0];
+        } else if (region) {
+            const cityMatch = title.match(/.*?([市町村区])/);
+            if (cityMatch) {
+                return region + cityMatch[1]; 
             }
-        } catch (e) {
-            console.error("API Error:", e);
+            return region;
         }
+        
+        // 策略 3: 尋找常見地名後綴 (排除雜訊)
+        const looseMatch = title.match(/.*?([市町村])/);
+        if (looseMatch && !title.includes("日本不審者")) {
+            return looseMatch[0];
+        }
+
         return null;
     }
 
-    // 6. 主處理流程
-    async function processAllData(data) {
-        const list = document.getElementById('news-list');
-        const statusBar = document.getElementById('status-bar');
-        
-        for (let i = 0; i < data.length; i++) {
-            const item = data[i];
-            const placeName = extractPlaceName(item.location);
-            
-            // 建立卡片 UI (初始狀態)
-            const cardId = `card-${i}`;
-            const card = document.createElement('div');
-            card.id = cardId;
-            card.className = 'card searching';
-            card.innerHTML = `
-                <h4>${item.location}</h4>
-                <div class="meta">${item.date} | ${item.source}</div>
-                <div class="status-tag" id="status-${i}">
-                    <div class="loader"></div> 正在搜尋座標: ${placeName || "未知"}...
-                </div>
-            `;
-            list.appendChild(card);
+    // 隊列系統 (Rate Limiting)
+    let fetchQueue = [];
+    let isProcessing = false;
 
-            if (placeName) {
-                statusBar.innerText = `正在處理: ${placeName} (${i+1}/${data.length})`;
-                
-                // 執行搜尋
-                const coords = await fetchCoordinates(placeName);
-                
-                const statusTag = document.getElementById(`status-${i}`);
-                const cardDiv = document.getElementById(cardId);
+    function addToMap(item, lat, lng, isCached) {
+        // 增加隨機偏移，防止同一城市的點完全重疊
+        const jitter = 0.005; 
+        const finalLat = parseFloat(lat) + (Math.random() - 0.5) * jitter;
+        const finalLng = parseFloat(lng) + (Math.random() - 0.5) * jitter;
 
-                if (coords) {
-                    // 隨機偏移 (Jitter)
-                    const jitter = 0.03;
-                    const finalLat = coords.lat + (Math.random() - 0.5) * jitter;
-                    const finalLng = coords.lng + (Math.random() - 0.5) * jitter;
+        // 確保 ID 存在，如果 JSON 沒有 ID，用標題的 Hash 代替
+        const itemId = item.id || 'id-' + Math.abs(item.title.split("").reduce((a,b)=>{a=((a<<5)-a)+b.charCodeAt(0);return a&a},0));
 
-                    // 更新地圖
-                    const marker = L.marker([finalLat, finalLng], {icon: bearIcon})
-                        .bindPopup(`<h3>${item.location}</h3><p>${item.title}</p>`);
-                    markers.addLayer(marker);
+        const marker = L.marker([finalLat, finalLng], {icon: bearIcon})
+            .bindPopup(`<b>${item.title}</b><br><small>${item.date}</small><br><a href="${item.link}" target="_blank">來源: ${item.source}</a>`);
+        markers.addLayer(marker);
+
+        // 更新側邊欄狀態
+        const card = document.getElementById(`card-${itemId}`);
+        if (card) {
+            card.classList.remove('locating');
+            card.classList.add('located');
+            const statusSpan = card.querySelector('.status-text');
+            statusSpan.innerHTML = isCached ? '⚡ 緩存命中' : '🟢 API 定位';
+            statusSpan.className = 'status-text status-success';
+        }
+    }
+
+    function processQueue() {
+        if (fetchQueue.length === 0) {
+            isProcessing = false;
+            document.getElementById('progress-text').innerText = "所有數據處理完畢";
+            return;
+        }
+
+        isProcessing = true;
+        const task = fetchQueue.shift();
+        const { item, locationName, itemId } = task;
+
+        document.getElementById('progress-text').innerText = `正在定位: ${locationName}... (剩餘 ${fetchQueue.length})`;
+
+        // OpenStreetMap Nominatim API
+        fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(locationName)}`)
+            .then(res => res.json())
+            .then(data => {
+                if (data && data.length > 0) {
+                    const lat = data[0].lat;
+                    const lon = data[0].lon;
                     
-                    // 更新 UI
-                    cardDiv.classList.remove('searching');
-                    cardDiv.classList.add('located');
-                    statusTag.innerHTML = `📍 已定位 (${placeName})`;
-                    statusTag.style.background = "#225522";
-                    statusTag.style.color = "#88ff88";
-                    
-                    // 點擊卡片飛去地圖
-                    cardDiv.onclick = () => {
-                        map.setView([finalLat, finalLng], 12);
-                        marker.openPopup();
-                    };
+                    // 存入緩存
+                    locationCache[locationName] = { lat: lat, lng: lon };
+                    saveCache();
 
+                    addToMap(item, lat, lon, false);
                 } else {
-                    statusTag.innerHTML = `⚠️ 無法定位`;
-                    statusTag.style.background = "#552222";
+                    // 失敗處理
+                    const card = document.getElementById(`card-${itemId}`);
+                    if(card) {
+                        card.classList.remove('locating');
+                        card.classList.add('failed');
+                        card.querySelector('.status-text').innerText = '🔴 找不到地點';
+                        card.querySelector('.status-text').className = 'status-text status-error';
+                    }
                 }
-            } else {
-                document.getElementById(`status-${i}`).innerHTML = `❌ 無法識別地名`;
-            }
-        }
-        statusBar.innerText = "所有數據處理完畢。";
+            })
+            .catch(err => console.error(err))
+            .finally(() => {
+                // 嚴格遵守 API 規範，間隔 1.2 秒
+                setTimeout(processQueue, 1200);
+            });
     }
 
-    // 開始執行
-    processAllData(mockData);
+    // --- 3. 主程式：讀取外部 JSON ---
+    
+    // 使用時間戳防止瀏覽器緩存 JSON 檔案
+    fetch('bear_data.json?t=' + new Date().getTime())
+        .then(response => {
+            if (!response.ok) {
+                throw new Error("HTTP error " + response.status);
+            }
+            return response.json();
+        })
+        .then(data => {
+            const list = document.getElementById('news-list');
+            document.getElementById('progress-text').innerText = `讀取到 ${data.length} 筆資料，開始分析...`;
+
+            data.forEach((item, index) => {
+                // 產生唯一 ID (如果 JSON 裡沒有 id 欄位)
+                const itemId = item.id || 'id-' + index;
+                item.id = itemId; // 補回 item 物件方便後續使用
+
+                // 1. 建立側邊欄卡片
+                const card = document.createElement('div');
+                card.className = 'card locating'; 
+                card.id = `card-${itemId}`;
+                
+                // 嘗試提取地名
+                let locName = extractLocation(item.title);
+                
+                let displayTitle = item.title.length > 40 ? item.title.substring(0, 40) + "..." : item.title;
+
+                card.innerHTML = `
+                    <span class="status-text status-searching">🟡 搜尋中...</span>
+                    <h3>${displayTitle}</h3>
+                    <div class="meta">日期: ${item.date} | 地點判定: ${locName || "未知"}</div>
+                    <a href="${item.link}" target="_blank">閱讀新聞 (${item.source})</a>
+                `;
+                list.appendChild(card);
+
+                if (!locName) {
+                    card.classList.remove('locating');
+                    card.classList.add('failed');
+                    card.querySelector('.status-text').innerText = "🔴 無法解析地名";
+                    card.querySelector('.status-text').className = 'status-text status-error';
+                    return;
+                }
+
+                // 2. 檢查緩存
+                if (locationCache[locName]) {
+                    // 命中緩存 -> 立即顯示
+                    addToMap(item, locationCache[locName].lat, locationCache[locName].lng, true);
+                } else {
+                    // 未命中 -> 加入 API 隊列
+                    fetchQueue.push({ item: item, locationName: locName, itemId: itemId });
+                }
+            });
+
+            // 啟動隊列
+            if (fetchQueue.length > 0) {
+                processQueue();
+            } else {
+                document.getElementById('progress-text').innerText = "全部由緩存載入完成";
+            }
+        })
+        .catch(err => {
+            console.error("讀取 JSON 失敗:", err);
+            document.getElementById('news-list').innerHTML = `<div style="padding:20px; color:#ff4444;">讀取 bear_data.json 失敗。<br>請確保檔案存在且格式正確。<br>錯誤訊息: ${err.message}</div>`;
+        });
 
 </script>
 
