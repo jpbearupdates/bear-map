@@ -8,7 +8,7 @@
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     
-    <!-- 加入 MarkerCluster CSS (聚合樣式) -->
+    <!-- MarkerCluster CSS (聚合樣式) -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
 
@@ -21,7 +21,7 @@
         .card small { color: #aaa; }
         .card a { color: #88ccff; text-decoration: none; display: block; margin-top: 5px; }
         
-        /* 修正 Popup 文字顏色，因為底圖係深色 */
+        /* 修正 Popup 文字顏色 */
         .leaflet-popup-content-wrapper, .leaflet-popup-tip {
             background: #333;
             color: #fff;
@@ -42,7 +42,7 @@
 
 <!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<!-- 加入 MarkerCluster JS (聚合功能) -->
+<!-- MarkerCluster JS -->
 <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 
 <script>
@@ -51,10 +51,10 @@
         attribution: '© OpenStreetMap, © CARTO'
     }).addTo(map);
 
-    // 建立聚合群組 (Cluster Group)
+    // 建立聚合群組
     const markers = L.markerClusterGroup({
-        disableClusteringAtZoom: 14, // 拉近到 Zoom 14 就唔再聚合，顯示原本圖示
-        spiderfyOnMaxZoom: true      // 最底層如果重疊，點擊會散開
+        disableClusteringAtZoom: 14,
+        spiderfyOnMaxZoom: true
     });
 
     const bearIcon = L.icon({
@@ -65,35 +65,27 @@
     });
 
     // 讀取 JSON 檔案
-    fetch('bear_data.json?t=' + new Date().getTime()) // 加入 timestamp 防止緩存
+    fetch('bear_data.json?t=' + new Date().getTime())
         .then(response => response.json())
         .then(data => {
             const list = document.getElementById('news-list');
             document.getElementById('last-updated').innerText = `數據截至: ${new Date().toLocaleString()}`;
 
             data.forEach(item => {
-    // --- 加入呢幾行 ---
-    // 0.008 大約等於幾百米，令個點隨機散開少少
-    const offset = 0.008; 
-    const jitterLat = item.lat + (Math.random() - 0.5) * offset;
-    const jitterLng = item.lng + (Math.random() - 0.5) * offset;
-    // ----------------
+                // --- 1. 計算隨機偏移 (Jitter) ---
+                // 0.008 大約等於幾百米，防止同一個地點嘅 Marker 疊埋一齊
+                const offset = 0.008; 
+                const jitterLat = item.lat + (Math.random() - 0.5) * offset;
+                const jitterLng = item.lng + (Math.random() - 0.5) * offset;
 
-    // 注意：下面個 L.marker 入面要改用 jitterLat 同 jitterLng
-    const marker = L.marker([jitterLat, jitterLng], {icon: bearIcon})
-        .bindPopup(`<b>${item.location}</b><br>${item.title}<br><small>${item.date}</small><br><a href="${item.link}" target="_blank">新聞連結</a>`);
+                // --- 2. 建立 Marker (用 jitterLat/Lng) ---
+                const marker = L.marker([jitterLat, jitterLng], {icon: bearIcon})
+                    .bindPopup(`<b>${item.location}</b><br>${item.title}<br><small>${item.date}</small><br><a href="${item.link}" target="_blank">新聞連結</a>`);
 
-    markers.addLayer(marker);
-    
-    // 下面 Card 嘅 code 唔洗郁...
-    const card = document.createElement('div');
-    // ...
-});
-
-                // 重點：將 Marker 加入聚合群組，而唔係直接 addTo(map)
+                // --- 3. 加入聚合群組 ---
                 markers.addLayer(marker);
 
-                // 側邊欄列表
+                // --- 4. 建立側邊欄卡片 ---
                 const card = document.createElement('div');
                 card.className = 'card';
                 card.innerHTML = `
@@ -105,7 +97,7 @@
                 list.appendChild(card);
             });
 
-            // 迴圈完結後，將整個群組加入地圖
+            // 迴圈完結後，一次過將群組加入地圖
             map.addLayer(markers);
         })
         .catch(err => console.error("無法讀取數據:", err));
