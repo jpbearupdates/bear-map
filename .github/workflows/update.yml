@@ -1,0 +1,37 @@
+name: Update Bear Map
+
+on:
+  schedule:
+    - cron: '0 */4 * * *' # 每 4 小時執行一次 (你可以自己改時間)
+  workflow_dispatch:      # 讓你可以手動按按鈕執行
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    # ▼▼▼ 重點是這一段 ▼▼▼
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install feedparser requests
+    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
+    - name: Run scraper
+      run: python scraper.py
+
+    - name: Commit and push changes
+      run: |
+        git config --global user.name "GitHub Action"
+        git config --global user.email "action@github.com"
+        git add data/bears.json
+        git commit -m "Update bear data" || exit 0
+        git push
