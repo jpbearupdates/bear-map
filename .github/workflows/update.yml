@@ -2,8 +2,11 @@ name: Update Bear Map
 
 on:
   schedule:
-    - cron: '0 */4 * * *' # 每 4 小時執行一次 (你可以自己改時間)
-  workflow_dispatch:      # 讓你可以手動按按鈕執行
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -18,20 +21,24 @@ jobs:
       with:
         python-version: '3.9'
 
-    # ▼▼▼ 重點是這一段 ▼▼▼
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install feedparser requests
-    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+        # ▼▼▼ 修正：補上所有需要的套件 (Gemini, BS4, Geopy) ▼▼▼
+        pip install feedparser requests beautifulsoup4 geopy google-generativeai
 
     - name: Run scraper
+      # ▼▼▼ 修正：補上 API Key，不然程式讀不到金鑰會報錯 ▼▼▼
+      env:
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       run: python scraper.py
 
     - name: Commit and push changes
       run: |
         git config --global user.name "GitHub Action"
         git config --global user.email "action@github.com"
-        git add data/bears.json
-        git commit -m "Update bear data" || exit 0
-        git push
+        # 確保你的程式是輸出到這個路徑，如果不是 data/bears.json 請自行修改
+        git add bear_data.json 
+        # 或是 git add data/bears.json (看你的程式寫入哪裡)
+        
+        git diff --quiet && git diff --staged --quiet || (git commit -m "Update bear data" && git push)
